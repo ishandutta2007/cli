@@ -77,7 +77,7 @@ type apiClient interface {
 	EditCodespace(ctx context.Context, codespaceName string, params *api.EditCodespaceParams) (*api.Codespace, error)
 	GetRepository(ctx context.Context, nwo string) (*api.Repository, error)
 	GetCodespacesMachines(ctx context.Context, repoID int, branch string, location string, devcontainerPath string) ([]*api.Machine, error)
-	GetCodespacesPermissionsCheck(ctx context.Context, repoID int, branch string, location string, devcontainerPath string) (bool, error)
+	GetCodespacesPermissionsCheck(ctx context.Context, repoID int, branch string, devcontainerPath string) (bool, error)
 	GetCodespaceRepositoryContents(ctx context.Context, codespace *api.Codespace, path string) ([]byte, error)
 	ListDevContainers(ctx context.Context, repoID int, branch string, limit int) (devcontainers []api.DevContainerEntry, err error)
 	GetCodespaceRepoSuggestions(ctx context.Context, partialSearch string, params api.RepoSearchParameters) ([]string, error)
@@ -114,10 +114,11 @@ func chooseCodespaceFromList(ctx context.Context, codespaces []*api.Codespace, i
 		},
 	}
 
+	prompter := &Prompter{}
 	var answers struct {
 		Codespace int
 	}
-	if err := ask(csSurvey, &answers); err != nil {
+	if err := prompter.Ask(csSurvey, &answers); err != nil {
 		return nil, fmt.Errorf("error getting answers: %w", err)
 	}
 
@@ -145,9 +146,15 @@ func safeClose(closer io.Closer, err *error) {
 // It is not portable to assume stdin/stdout are fds 0 and 1.
 var hasTTY = term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 
+type SurveyPrompter interface {
+	Ask(qs []*survey.Question, response interface{}) error
+}
+
+type Prompter struct{}
+
 // ask asks survey questions on the terminal, using standard options.
 // It fails unless hasTTY, but ideally callers should avoid calling it in that case.
-func ask(qs []*survey.Question, response interface{}) error {
+func (p *Prompter) Ask(qs []*survey.Question, response interface{}) error {
 	if !hasTTY {
 		return fmt.Errorf("no terminal")
 	}
@@ -191,7 +198,7 @@ func (c codespace) displayName(includeOwner bool) string {
 		displayName = c.Name
 	}
 
-	description := fmt.Sprintf("%s (%s): %s", c.Repository.FullName, branch, displayName)
+	description := fmt.Sprintf("%s [%s]: %s", c.Repository.FullName, branch, displayName)
 
 	if includeOwner {
 		description = fmt.Sprintf("%-15s %s", c.Owner.Login, description)

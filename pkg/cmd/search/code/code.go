@@ -40,7 +40,7 @@ func NewCmdCode(f *cmdutil.Factory, runF func(*CodeOptions) error) *cobra.Comman
 			<https://docs.github.com/search-github/searching-on-github/searching-code>
 
 			Note that these search results are powered by what is now a legacy GitHub code search engine.
-			The results might not match what is seen on GitHub.com, and new features like regex search
+			The results might not match what is seen on github.com, and new features like regex search
 			are not yet available via the GitHub API.
 		`),
 		Example: heredoc.Doc(`
@@ -143,7 +143,7 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 			}
 			fmt.Fprintf(io.Out, "%s %s\n", cs.Blue(code.Repository.FullName), cs.GreenBold(code.Path))
 			for _, match := range code.TextMatches {
-				lines := formatMatch(match.Fragment, match.Matches, io.ColorEnabled())
+				lines := formatMatch(match.Fragment, match.Matches, io)
 				for _, line := range lines {
 					fmt.Fprintf(io.Out, "\t%s\n", strings.TrimSpace(line))
 				}
@@ -153,7 +153,7 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 	}
 	for _, code := range results.Items {
 		for _, match := range code.TextMatches {
-			lines := formatMatch(match.Fragment, match.Matches, io.ColorEnabled())
+			lines := formatMatch(match.Fragment, match.Matches, io)
 			for _, line := range lines {
 				fmt.Fprintf(io.Out, "%s:%s: %s\n", cs.Blue(code.Repository.FullName), cs.GreenBold(code.Path), strings.TrimSpace(line))
 			}
@@ -162,7 +162,9 @@ func displayResults(io *iostreams.IOStreams, results search.CodeResult) error {
 	return nil
 }
 
-func formatMatch(t string, matches []search.Match, colorize bool) []string {
+func formatMatch(t string, matches []search.Match, io *iostreams.IOStreams) []string {
+	cs := io.ColorScheme()
+
 	startIndices := map[int]struct{}{}
 	endIndices := map[int]struct{}{}
 	for _, m := range matches {
@@ -186,14 +188,10 @@ func formatMatch(t string, matches []search.Match, colorize bool) []string {
 			continue
 		}
 		if _, ok := startIndices[i]; ok {
-			if colorize {
-				b.WriteString("\x1b[30;43m") // black text on yellow background
-			}
+			b.WriteString(cs.HighlightStart())
 			found = true
 		} else if _, ok := endIndices[i]; ok {
-			if colorize {
-				b.WriteString("\x1b[m") // color reset
-			}
+			b.WriteString(cs.Reset())
 		}
 		b.WriteRune(c)
 	}

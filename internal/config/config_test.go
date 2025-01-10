@@ -1,10 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/cli/cli/v2/internal/gh"
 	ghConfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
@@ -22,78 +24,14 @@ func TestNewConfigProvidesFallback(t *testing.T) {
 	}
 	_, err := NewConfig()
 	require.NoError(t, err)
-	requireKeyWithValue(t, spiedCfg, []string{"git_protocol"}, "https")
-	requireKeyWithValue(t, spiedCfg, []string{"editor"}, "")
-	requireKeyWithValue(t, spiedCfg, []string{"prompt"}, "enabled")
-	requireKeyWithValue(t, spiedCfg, []string{"pager"}, "")
-	requireKeyWithValue(t, spiedCfg, []string{"aliases", "co"}, "pr checkout")
-	requireKeyWithValue(t, spiedCfg, []string{"http_unix_socket"}, "")
-	requireKeyWithValue(t, spiedCfg, []string{"browser"}, "")
-}
-
-func TestGetNonExistentKey(t *testing.T) {
-	// Given we have no top level configuration
-	cfg := newTestConfig()
-
-	// When we get a key that has no value
-	val, err := cfg.Get("", "non-existent-key")
-
-	// Then it returns an error and the value is empty
-	var keyNotFoundError *ghConfig.KeyNotFoundError
-	require.ErrorAs(t, err, &keyNotFoundError)
-	require.Empty(t, val)
-}
-
-func TestGetNonExistentHostSpecificKey(t *testing.T) {
-	// Given have no top level configuration
-	cfg := newTestConfig()
-
-	// When we get a key for a host that has no value
-	val, err := cfg.Get("non-existent-host", "non-existent-key")
-
-	// Then it returns an error and the value is empty
-	var keyNotFoundError *ghConfig.KeyNotFoundError
-	require.ErrorAs(t, err, &keyNotFoundError)
-	require.Empty(t, val)
-}
-
-func TestGetExistingTopLevelKey(t *testing.T) {
-	// Given have a top level config entry
-	cfg := newTestConfig()
-	cfg.Set("", "top-level-key", "top-level-value")
-
-	// When we get that key
-	val, err := cfg.Get("non-existent-host", "top-level-key")
-
-	// Then it returns successfully with the correct value
-	require.NoError(t, err)
-	require.Equal(t, "top-level-value", val)
-}
-
-func TestGetExistingHostSpecificKey(t *testing.T) {
-	// Given have a host specific config entry
-	cfg := newTestConfig()
-	cfg.Set("github.com", "host-specific-key", "host-specific-value")
-
-	// When we get that key
-	val, err := cfg.Get("github.com", "host-specific-key")
-
-	// Then it returns successfully with the correct value
-	require.NoError(t, err)
-	require.Equal(t, "host-specific-value", val)
-}
-
-func TestGetHostnameSpecificKeyFallsBackToTopLevel(t *testing.T) {
-	// Given have a top level config entry
-	cfg := newTestConfig()
-	cfg.Set("", "key", "value")
-
-	// When we get that key on a specific host
-	val, err := cfg.Get("github.com", "key")
-
-	// Then it returns successfully, falling back to the top level config
-	require.NoError(t, err)
-	require.Equal(t, "value", val)
+	requireKeyWithValue(t, spiedCfg, []string{versionKey}, "1")
+	requireKeyWithValue(t, spiedCfg, []string{gitProtocolKey}, "https")
+	requireKeyWithValue(t, spiedCfg, []string{editorKey}, "")
+	requireKeyWithValue(t, spiedCfg, []string{promptKey}, "enabled")
+	requireKeyWithValue(t, spiedCfg, []string{pagerKey}, "")
+	requireKeyWithValue(t, spiedCfg, []string{aliasesKey, "co"}, "pr checkout")
+	requireKeyWithValue(t, spiedCfg, []string{httpUnixSocketKey}, "")
+	requireKeyWithValue(t, spiedCfg, []string{browserKey}, "")
 }
 
 func TestGetOrDefaultApplicationDefaults(t *testing.T) {
@@ -101,12 +39,12 @@ func TestGetOrDefaultApplicationDefaults(t *testing.T) {
 		key             string
 		expectedDefault string
 	}{
-		{"git_protocol", "https"},
-		{"editor", ""},
-		{"prompt", "enabled"},
-		{"pager", ""},
-		{"http_unix_socket", ""},
-		{"browser", ""},
+		{gitProtocolKey, "https"},
+		{editorKey, ""},
+		{promptKey, "enabled"},
+		{pagerKey, ""},
+		{httpUnixSocketKey, ""},
+		{browserKey, ""},
 	}
 
 	for _, tt := range tests {
@@ -115,50 +53,130 @@ func TestGetOrDefaultApplicationDefaults(t *testing.T) {
 			cfg := newTestConfig()
 
 			// When we get a key that has no value, but has a default
-			val, err := cfg.GetOrDefault("", tt.key)
+			optionalEntry := cfg.GetOrDefault("", tt.key)
 
-			// Then it returns the default value
-			require.NoError(t, err)
-			require.Equal(t, tt.expectedDefault, val)
+			// Then there is an entry with the default value, and source set as default
+			entry := optionalEntry.Expect(fmt.Sprintf("expected there to be a value for %s", tt.key))
+			require.Equal(t, tt.expectedDefault, entry.Value)
+			require.Equal(t, gh.ConfigDefaultProvided, entry.Source)
 		})
 	}
 }
 
-func TestGetOrDefaultExistingKey(t *testing.T) {
-	// Given have a top level config entry
+func TestGetOrDefaultNonExistentKey(t *testing.T) {
+	// Given we have no top level configuration
 	cfg := newTestConfig()
-	cfg.Set("", "git_protocol", "ssh")
 
-	// When we get that key
-	val, err := cfg.GetOrDefault("", "git_protocol")
+	// When we get a key that has no value
+	optionalEntry := cfg.GetOrDefault("", "non-existent-key")
 
-	// Then it returns successfully with the correct value, and doesn't fall back
-	// to the default
-	require.NoError(t, err)
-	require.Equal(t, "ssh", val)
+	// Then it returns a None variant
+	require.True(t, optionalEntry.IsNone(), "expected there to be no value")
 }
 
-func TestGetOrDefaultNotFoundAndNoDefault(t *testing.T) {
-	// Given have no configuration
+func TestGetOrDefaultNonExistentHostSpecificKey(t *testing.T) {
+	// Given have no top level configuration
 	cfg := newTestConfig()
 
-	// When we get a non-existent-key that has no default
-	val, err := cfg.GetOrDefault("", "non-existent-key")
+	// When we get a key for a host that has no value
+	optionalEntry := cfg.GetOrDefault("non-existent-host", "non-existent-key")
 
-	// Then it returns an error and the value is empty
-	var keyNotFoundError *ghConfig.KeyNotFoundError
-	require.ErrorAs(t, err, &keyNotFoundError)
-	require.Empty(t, val)
+	// Then it returns a None variant
+	require.True(t, optionalEntry.IsNone(), "expected there to be no value")
+}
+
+func TestGetOrDefaultExistingTopLevelKey(t *testing.T) {
+	// Given have a top level config entry
+	cfg := newTestConfig()
+	cfg.Set("", "top-level-key", "top-level-value")
+
+	// When we get that key
+	optionalEntry := cfg.GetOrDefault("non-existent-host", "top-level-key")
+
+	// Then it returns a Some variant containing the correct value and a source of user
+	entry := optionalEntry.Expect("expected there to be a value")
+	require.Equal(t, "top-level-value", entry.Value)
+	require.Equal(t, gh.ConfigUserProvided, entry.Source)
+}
+
+func TestGetOrDefaultExistingHostSpecificKey(t *testing.T) {
+	// Given have a host specific config entry
+	cfg := newTestConfig()
+	cfg.Set("github.com", "host-specific-key", "host-specific-value")
+
+	// When we get that key
+	optionalEntry := cfg.GetOrDefault("github.com", "host-specific-key")
+
+	// Then it returns a Some variant containing the correct value and a source of user
+	entry := optionalEntry.Expect("expected there to be a value")
+	require.Equal(t, "host-specific-value", entry.Value)
+	require.Equal(t, gh.ConfigUserProvided, entry.Source)
+}
+
+func TestGetOrDefaultHostnameSpecificKeyFallsBackToTopLevel(t *testing.T) {
+	// Given have a top level config entry
+	cfg := newTestConfig()
+	cfg.Set("", "key", "value")
+
+	// When we get that key on a specific host
+	optionalEntry := cfg.GetOrDefault("github.com", "key")
+
+	// Then it returns a Some variant containing the correct value by falling back
+	// to the top level config, with a source of user
+	entry := optionalEntry.Expect("expected there to be a value")
+	require.Equal(t, "value", entry.Value)
+	require.Equal(t, gh.ConfigUserProvided, entry.Source)
 }
 
 func TestFallbackConfig(t *testing.T) {
 	cfg := fallbackConfig()
-	requireKeyWithValue(t, cfg, []string{"git_protocol"}, "https")
-	requireKeyWithValue(t, cfg, []string{"editor"}, "")
-	requireKeyWithValue(t, cfg, []string{"prompt"}, "enabled")
-	requireKeyWithValue(t, cfg, []string{"pager"}, "")
-	requireKeyWithValue(t, cfg, []string{"aliases", "co"}, "pr checkout")
-	requireKeyWithValue(t, cfg, []string{"http_unix_socket"}, "")
-	requireKeyWithValue(t, cfg, []string{"browser"}, "")
+	requireKeyWithValue(t, cfg, []string{gitProtocolKey}, "https")
+	requireKeyWithValue(t, cfg, []string{editorKey}, "")
+	requireKeyWithValue(t, cfg, []string{promptKey}, "enabled")
+	requireKeyWithValue(t, cfg, []string{pagerKey}, "")
+	requireKeyWithValue(t, cfg, []string{aliasesKey, "co"}, "pr checkout")
+	requireKeyWithValue(t, cfg, []string{httpUnixSocketKey}, "")
+	requireKeyWithValue(t, cfg, []string{browserKey}, "")
 	requireNoKey(t, cfg, []string{"unknown"})
+}
+
+func TestSetTopLevelKey(t *testing.T) {
+	c := newTestConfig()
+	host := ""
+	key := "top-level-key"
+	val := "top-level-value"
+	c.Set(host, key, val)
+	requireKeyWithValue(t, c.cfg, []string{key}, val)
+}
+
+func TestSetHostSpecificKey(t *testing.T) {
+	c := newTestConfig()
+	host := "github.com"
+	key := "host-level-key"
+	val := "host-level-value"
+	c.Set(host, key, val)
+	requireKeyWithValue(t, c.cfg, []string{hostsKey, host, key}, val)
+}
+
+func TestSetUserSpecificKey(t *testing.T) {
+	c := newTestConfig()
+	host := "github.com"
+	user := "test-user"
+	c.cfg.Set([]string{hostsKey, host, userKey}, user)
+
+	key := "host-level-key"
+	val := "host-level-value"
+	c.Set(host, key, val)
+	requireKeyWithValue(t, c.cfg, []string{hostsKey, host, key}, val)
+	requireKeyWithValue(t, c.cfg, []string{hostsKey, host, usersKey, user, key}, val)
+}
+
+func TestSetUserSpecificKeyNoUserPresent(t *testing.T) {
+	c := newTestConfig()
+	host := "github.com"
+	key := "host-level-key"
+	val := "host-level-value"
+	c.Set(host, key, val)
+	requireKeyWithValue(t, c.cfg, []string{hostsKey, host, key}, val)
+	requireNoKey(t, c.cfg, []string{hostsKey, host, usersKey})
 }

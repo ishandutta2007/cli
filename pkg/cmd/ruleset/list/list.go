@@ -15,7 +15,7 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/ruleset/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	ghAuth "github.com/cli/go-gh/v2/pkg/auth"
+	ghauth "github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/spf13/cobra"
 )
 
@@ -40,18 +40,18 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List rulesets for a repository or organization",
-		Long: heredoc.Doc(`
+		Long: heredoc.Docf(`
 			List GitHub rulesets for a repository or organization.
 
 			If no options are provided, the current repository's rulesets are listed. You can query a different
-			repository's rulesets by using the --repo flag. You can also use the --org flag to list rulesets
+			repository's rulesets by using the %[1]s--repo%[1]s flag. You can also use the %[1]s--org%[1]s flag to list rulesets
 			configured for the provided organization.
 
-			Use the --parents flag to control whether rulesets configured at higher levels that also apply to the provided
-			repository or organization should be returned. The default is true.
+			Use the %[1]s--parents%[1]s flag to control whether rulesets configured at higher levels that also apply to the provided
+			repository or organization should be returned. The default is %[1]strue%[1]s.
 			
-			Your access token must have the admin:org scope to use the --org flag, which can be granted by running "gh auth refresh -s admin:org".
-		`),
+			Your access token must have the %[1]sadmin:org%[1]s scope to use the %[1]s--org%[1]s flag, which can be granted by running %[1]sgh auth refresh -s admin:org%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
 			# List rulesets in the current repository
 			$ gh ruleset list
@@ -109,7 +109,7 @@ func listRun(opts *ListOptions) error {
 		}
 	}
 
-	hostname, _ := ghAuth.DefaultHost()
+	hostname, _ := ghauth.DefaultHost()
 
 	if opts.WebMode {
 		var rulesetURL string

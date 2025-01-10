@@ -10,6 +10,7 @@ import (
 	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFind(t *testing.T) {
@@ -346,7 +347,7 @@ func TestFind(t *testing.T) {
 			wantRepo: "https://github.com/OWNER/REPO",
 		},
 		{
-			name: "current branch with upstream configuration",
+			name: "current branch with upstream RemoteURL configuration",
 			args: args{
 				selector: "",
 				fields:   []string{"id", "number"},
@@ -384,6 +385,47 @@ func TestFind(t *testing.T) {
 			wantRepo: "https://github.com/OWNER/REPO",
 		},
 		{
+			name: "current branch with upstream and fork in same org",
+			args: args{
+				selector: "",
+				fields:   []string{"id", "number"},
+				baseRepoFn: func() (ghrepo.Interface, error) {
+					return ghrepo.FromFullName("OWNER/REPO")
+				},
+				branchFn: func() (string, error) {
+					return "blueberries", nil
+				},
+				branchConfig: func(branch string) (c git.BranchConfig) {
+					c.RemoteName = "origin"
+					return
+				},
+				remotesFn: func() (context.Remotes, error) {
+					return context.Remotes{{
+						Remote: &git.Remote{Name: "origin"},
+						Repo:   ghrepo.New("OWNER", "REPO-FORK"),
+					}}, nil
+				},
+			},
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.GraphQL(`query PullRequestForBranch\b`),
+					httpmock.StringResponse(`{"data":{"repository":{
+						"pullRequests":{"nodes":[
+							{
+								"number": 13,
+								"state": "OPEN",
+								"baseRefName": "main",
+								"headRefName": "blueberries",
+								"isCrossRepository": true,
+								"headRepositoryOwner": {"login":"OWNER"}
+							}
+						]}
+					}}}`))
+			},
+			wantPR:   13,
+			wantRepo: "https://github.com/OWNER/REPO",
+		},
+		{
 			name: "current branch made by pr checkout",
 			args: args{
 				selector: "",
@@ -405,6 +447,68 @@ func TestFind(t *testing.T) {
 					httpmock.StringResponse(`{"data":{"repository":{
 						"pullRequest":{"number":13}
 					}}}`))
+			},
+			wantPR:   13,
+			wantRepo: "https://github.com/OWNER/REPO",
+		},
+		{
+			name: "including project items",
+			args: args{
+				selector: "",
+				fields:   []string{"projectItems"},
+				baseRepoFn: func() (ghrepo.Interface, error) {
+					return ghrepo.FromFullName("OWNER/REPO")
+				},
+				branchFn: func() (string, error) {
+					return "blueberries", nil
+				},
+				branchConfig: func(branch string) (c git.BranchConfig) {
+					c.MergeRef = "refs/pull/13/head"
+					return
+				},
+			},
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.GraphQL(`query PullRequestByNumber\b`),
+					httpmock.StringResponse(`{"data":{"repository":{
+						"pullRequest":{"number":13}
+					}}}`))
+
+				r.Register(
+					httpmock.GraphQL(`query PullRequestProjectItems\b`),
+					httpmock.GraphQLQuery(`{
+                        "data": {
+                          "repository": {
+                            "pullRequest": {
+                              "projectItems": {
+                                "nodes": [
+                                  {
+                                    "id": "PVTI_lADOB-vozM4AVk16zgK6U50",
+                                    "project": {
+                                      "id": "PVT_kwDOB-vozM4AVk16",
+                                      "title": "Test Project"
+                                    },
+                                    "status": {
+                                      "optionId": "47fc9ee4",
+                                      "name": "In Progress"
+                                    }
+                                  }
+                                ],
+                                "pageInfo": {
+                                  "hasNextPage": false,
+                                  "endCursor": "MQ"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }`,
+						func(query string, inputs map[string]interface{}) {
+							require.Equal(t, float64(13), inputs["number"])
+							require.Equal(t, "OWNER", inputs["owner"])
+							require.Equal(t, "REPO", inputs["name"])
+						}),
+				)
 			},
 			wantPR:   13,
 			wantRepo: "https://github.com/OWNER/REPO",

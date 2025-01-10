@@ -256,7 +256,7 @@ func TestManager_UpgradeExtensions(t *testing.T) {
 		`
 		[hello]: upgraded from old vers to new vers
 		[local]: local extensions can not be upgraded
-		[two]: upgraded from old vers to new vers
+		[  two]: upgraded from old vers to new vers
 		`,
 	), stdout.String())
 	assert.Equal(t, "", stderr.String())
@@ -293,7 +293,7 @@ func TestManager_UpgradeExtensions_DryRun(t *testing.T) {
 		`
  		[hello]: would have upgraded from 0 to 1
  		[local]: local extensions can not be upgraded
- 		[two]: would have upgraded from 2 to 3
+ 		[  two]: would have upgraded from 2 to 3
  		`,
 	), stdout.String())
 	assert.Equal(t, "", stderr.String())
@@ -719,6 +719,63 @@ func TestManager_UpgradeExtension_GitExtension_Pinned(t *testing.T) {
 	gcOne.AssertExpectations(t)
 }
 
+func TestManager_Install_local(t *testing.T) {
+	extManagerDir := t.TempDir()
+	ios, _, stdout, stderr := iostreams.Test()
+	m := newTestManager(extManagerDir, nil, nil, ios)
+	fakeExtensionName := "local-ext"
+
+	// Create a temporary directory to simulate the local extension repo
+	extensionLocalPath := filepath.Join(extManagerDir, fakeExtensionName)
+	require.NoError(t, os.MkdirAll(extensionLocalPath, 0755))
+
+	// Create a fake executable in the local extension directory
+	fakeExtensionExecutablePath := filepath.Join(extensionLocalPath, fakeExtensionName)
+	require.NoError(t, stubExtension(fakeExtensionExecutablePath))
+
+	err := m.InstallLocal(extensionLocalPath)
+	require.NoError(t, err)
+
+	// This is the path to a file:
+	// on windows this is a file whose contents is a string describing the path to the local extension dir.
+	// on other platforms this file is a real symlink to the local extension dir.
+	extensionLinkFile := filepath.Join(extManagerDir, "extensions", fakeExtensionName)
+
+	if runtime.GOOS == "windows" {
+		// We don't create true symlinks on Windows, so check if we made a
+		// file with the correct contents to produce the symlink-like behavior
+		b, err := os.ReadFile(extensionLinkFile)
+		require.NoError(t, err)
+		assert.Equal(t, extensionLocalPath, string(b))
+	} else {
+		// Verify the created symlink points to the correct directory
+		linkTarget, err := os.Readlink(extensionLinkFile)
+		require.NoError(t, err)
+		assert.Equal(t, extensionLocalPath, linkTarget)
+	}
+	assert.Equal(t, "", stdout.String())
+	assert.Equal(t, "", stderr.String())
+}
+
+func TestManager_Install_local_no_executable_found(t *testing.T) {
+	tempDir := t.TempDir()
+	ios, _, stdout, stderr := iostreams.Test()
+	m := newTestManager(tempDir, nil, nil, ios)
+	fakeExtensionName := "local-ext"
+
+	// Create a temporary directory to simulate the local extension repo
+	localDir := filepath.Join(tempDir, fakeExtensionName)
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+
+	// Intentionally not creating an executable in the local extension repo
+	// to simulate an attempt to install a local extension without an executable
+
+	err := m.InstallLocal(localDir)
+	require.ErrorAs(t, err, new(*ErrExtensionExecutableNotFound))
+	assert.Equal(t, "", stdout.String())
+	assert.Equal(t, "", stderr.String())
+}
+
 func TestManager_Install_git(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -906,7 +963,59 @@ func TestManager_Install_binary_unsupported(t *testing.T) {
 	m := newTestManager(tempDir, &client, nil, ios)
 
 	err := m.Install(repo, "")
-	assert.EqualError(t, err, "gh-bin-ext unsupported for windows-amd64. Open an issue: `gh issue create -R owner/gh-bin-ext -t'Support windows-amd64'`")
+	assert.EqualError(t, err, "gh-bin-ext unsupported for windows-amd64.\n\nTo request support for windows-amd64, open an issue on the extension's repo by running the following command:\n\n\t`gh issue create -R owner/gh-bin-ext --title \"Add support for the windows-amd64 architecture\" --body \"This extension does not support the windows-amd64 architecture. I tried to install it on a windows-amd64 machine, and it failed due to the lack of an available binary. Would you be able to update the extension's build and release process to include the relevant binary? For more details, see <https://docs.github.com/en/github-cli/github-cli/creating-github-cli-extensions>.\"`")
+
+	assert.Equal(t, "", stdout.String())
+	assert.Equal(t, "", stderr.String())
+}
+
+func TestManager_Install_rosetta_fallback_not_found(t *testing.T) {
+	repo := ghrepo.NewWithHost("owner", "gh-bin-ext", "example.com")
+
+	reg := httpmock.Registry{}
+	defer reg.Verify(t)
+	client := http.Client{Transport: &reg}
+
+	reg.Register(
+		httpmock.REST("GET", "api/v3/repos/owner/gh-bin-ext/releases/latest"),
+		httpmock.JSONResponse(
+			release{
+				Assets: []releaseAsset{
+					{
+						Name:   "gh-bin-ext-darwin-amd64",
+						APIURL: "https://example.com/release/cool",
+					},
+				},
+			}))
+	reg.Register(
+		httpmock.REST("GET", "api/v3/repos/owner/gh-bin-ext/releases/latest"),
+		httpmock.JSONResponse(
+			release{
+				Tag: "v1.0.1",
+				Assets: []releaseAsset{
+					{
+						Name:   "gh-bin-ext-darwin-amd64",
+						APIURL: "https://example.com/release/cool",
+					},
+				},
+			}))
+
+	ios, _, stdout, stderr := iostreams.Test()
+	tempDir := t.TempDir()
+
+	m := newTestManager(tempDir, &client, nil, ios)
+	m.platform = func() (string, string) {
+		return "darwin-arm64", ""
+	}
+
+	originalHasRosetta := hasRosetta
+	t.Cleanup(func() { hasRosetta = originalHasRosetta })
+	hasRosetta = func() bool {
+		return false
+	}
+
+	err := m.Install(repo, "")
+	assert.EqualError(t, err, "gh-bin-ext unsupported for darwin-arm64. Install Rosetta with `softwareupdate --install-rosetta` to use the available darwin-amd64 binary, or open an issue: `gh issue create -R owner/gh-bin-ext -t'Support darwin-arm64'`")
 
 	assert.Equal(t, "", stdout.String())
 	assert.Equal(t, "", stderr.String())
@@ -973,6 +1082,80 @@ func TestManager_Install_binary(t *testing.T) {
 	assert.Equal(t, "FAKE BINARY", string(fakeBin))
 
 	assert.Equal(t, "", stdout.String())
+	assert.Equal(t, "", stderr.String())
+}
+
+func TestManager_Install_amd64_when_supported(t *testing.T) {
+	repo := ghrepo.NewWithHost("owner", "gh-bin-ext", "example.com")
+
+	reg := httpmock.Registry{}
+	defer reg.Verify(t)
+	client := http.Client{Transport: &reg}
+
+	reg.Register(
+		httpmock.REST("GET", "api/v3/repos/owner/gh-bin-ext/releases/latest"),
+		httpmock.JSONResponse(
+			release{
+				Assets: []releaseAsset{
+					{
+						Name:   "gh-bin-ext-darwin-amd64",
+						APIURL: "https://example.com/release/cool",
+					},
+				},
+			}))
+	reg.Register(
+		httpmock.REST("GET", "api/v3/repos/owner/gh-bin-ext/releases/latest"),
+		httpmock.JSONResponse(
+			release{
+				Tag: "v1.0.1",
+				Assets: []releaseAsset{
+					{
+						Name:   "gh-bin-ext-darwin-amd64",
+						APIURL: "https://example.com/release/cool",
+					},
+				},
+			}))
+	reg.Register(
+		httpmock.REST("GET", "release/cool"),
+		httpmock.StringResponse("FAKE BINARY"))
+
+	ios, _, stdout, stderr := iostreams.Test()
+	tempDir := t.TempDir()
+
+	m := newTestManager(tempDir, &client, nil, ios)
+	m.platform = func() (string, string) {
+		return "darwin-arm64", ""
+	}
+
+	originalHasRosetta := hasRosetta
+	t.Cleanup(func() { hasRosetta = originalHasRosetta })
+	hasRosetta = func() bool {
+		return true
+	}
+
+	err := m.Install(repo, "")
+	assert.NoError(t, err)
+
+	manifest, err := os.ReadFile(filepath.Join(tempDir, "extensions/gh-bin-ext", manifestName))
+	assert.NoError(t, err)
+
+	var bm binManifest
+	err = yaml.Unmarshal(manifest, &bm)
+	assert.NoError(t, err)
+
+	assert.Equal(t, binManifest{
+		Name:  "gh-bin-ext",
+		Owner: "owner",
+		Host:  "example.com",
+		Tag:   "v1.0.1",
+		Path:  filepath.Join(tempDir, "extensions/gh-bin-ext/gh-bin-ext"),
+	}, bm)
+
+	fakeBin, err := os.ReadFile(filepath.Join(tempDir, "extensions/gh-bin-ext/gh-bin-ext"))
+	assert.NoError(t, err)
+	assert.Equal(t, "FAKE BINARY", string(fakeBin))
+
+	assert.Equal(t, "gh-bin-ext not available for darwin-arm64. Falling back to compatible darwin-amd64 binary\n", stdout.String())
 	assert.Equal(t, "", stderr.String())
 }
 

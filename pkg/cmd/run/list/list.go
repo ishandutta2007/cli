@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/MakeNowJust/heredoc"
+
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/tableprinter"
@@ -34,6 +36,8 @@ type ListOptions struct {
 	Status           string
 	Event            string
 	Created          string
+	Commit           string
+	All              bool
 
 	now time.Time
 }
@@ -51,8 +55,14 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	}
 
 	cmd := &cobra.Command{
-		Use:     "list",
-		Short:   "List recent workflow runs",
+		Use:   "list",
+		Short: "List recent workflow runs",
+		Long: heredoc.Docf(`
+			List recent workflow runs.
+
+			Note that providing the %[1]sworkflow_name%[1]s to the %[1]s-w%[1]s flag will not fetch disabled workflows.
+			Also pass the %[1]s-a%[1]s flag to fetch disabled workflow runs using the %[1]sworkflow_name%[1]s and the %[1]s-w%[1]s flag.
+		`, "`"),
 		Aliases: []string{"ls"},
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -77,6 +87,8 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	cmd.Flags().StringVarP(&opts.Actor, "user", "u", "", "Filter runs by user who triggered the run")
 	cmd.Flags().StringVarP(&opts.Event, "event", "e", "", "Filter runs by which `event` triggered the run")
 	cmd.Flags().StringVarP(&opts.Created, "created", "", "", "Filter runs by the `date` it was created")
+	cmd.Flags().StringVarP(&opts.Commit, "commit", "c", "", "Filter runs by the `SHA` of the commit")
+	cmd.Flags().BoolVarP(&opts.All, "all", "a", false, "Include disabled workflows")
 	cmdutil.StringEnumFlag(cmd, &opts.Status, "status", "s", "", shared.AllStatuses, "Filter runs by status")
 	cmdutil.AddJSONFlags(cmd, &opts.Exporter, shared.RunFields)
 
@@ -103,14 +115,19 @@ func listRun(opts *ListOptions) error {
 		Status:  opts.Status,
 		Event:   opts.Event,
 		Created: opts.Created,
+		Commit:  opts.Commit,
 	}
 
 	opts.IO.StartProgressIndicator()
 	if opts.WorkflowSelector != "" {
+		// initially the workflow state is limited to 'active'
 		states := []workflowShared.WorkflowState{workflowShared.Active}
-		if workflow, err := workflowShared.ResolveWorkflow(
-			opts.Prompter, opts.IO, client, baseRepo, false, opts.WorkflowSelector,
-			states); err == nil {
+		if opts.All {
+			// the all flag tells us to add the remaining workflow states
+			// note: this will be incomplete if more workflow states are added to `workflowShared`
+			states = append(states, workflowShared.DisabledManually, workflowShared.DisabledInactivity)
+		}
+		if workflow, err := workflowShared.ResolveWorkflow(opts.Prompter, opts.IO, client, baseRepo, false, opts.WorkflowSelector, states); err == nil {
 			filters.WorkflowID = workflow.ID
 			filters.WorkflowName = workflow.Name
 		} else {
@@ -155,7 +172,7 @@ func listRun(opts *ListOptions) error {
 		tp.AddField(string(run.Event))
 		tp.AddField(fmt.Sprintf("%d", run.ID), tableprinter.WithColor(cs.Cyan))
 		tp.AddField(run.Duration(opts.now).String())
-		tp.AddTimeField(time.Now(), run.StartedTime(), cs.Gray)
+		tp.AddTimeField(opts.now, run.StartedTime(), cs.Gray)
 		tp.EndRow()
 	}
 

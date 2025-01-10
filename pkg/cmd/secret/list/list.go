@@ -3,12 +3,13 @@ package list
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/pkg/cmd/secret/shared"
@@ -20,7 +21,7 @@ import (
 type ListOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	BaseRepo   func() (ghrepo.Interface, error)
 	Now        func() time.Time
 	Exporter   cmdutil.Exporter
@@ -39,6 +40,8 @@ var secretFields = []string{
 	"numSelectedRepos",
 }
 
+const fieldNumSelectedRepos = "numSelectedRepos"
+
 func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Command {
 	opts := &ListOptions{
 		IO:         f.IOStreams,
@@ -52,9 +55,9 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 		Short: "List secrets",
 		Long: heredoc.Doc(`
 			List secrets on one of the following levels:
-			- repository (default): available to Actions runs or Dependabot in a repository
-			- environment: available to Actions runs for a deployment environment in a repository
-			- organization: available to Actions runs, Dependabot, or Codespaces within an organization
+			- repository (default): available to GitHub Actions runs or Dependabot in a repository
+			- environment: available to GitHub Actions runs for a deployment environment in a repository
+			- organization: available to GitHub Actions runs, Dependabot, or Codespaces within an organization
 			- user: available to Codespaces for your user
 		`),
 		Aliases: []string{"ls"},
@@ -114,16 +117,28 @@ func listRun(opts *ListOptions) error {
 		return fmt.Errorf("%s secrets are not supported for %s", secretEntity, secretApp)
 	}
 
-	var secrets []Secret
+	// Since populating the `NumSelectedRepos` field costs further API requests
+	// (one per secret), it's important to avoid extra calls when the output will
+	// not present the field's value. So, we should only populate this field in
+	// these cases:
+	//  1. The command is run in the TTY mode without the `--json <fields>` option.
+	//  2. The command is run with `--json <fields>` option, and `numSelectedRepos`
+	//     is among the selected fields. In this case, TTY mode is irrelevant.
 	showSelectedRepoInfo := opts.IO.IsStdoutTTY()
+	if opts.Exporter != nil {
+		// Note that if there's an exporter set, then we don't mind the TTY mode
+		// because we just have to populate the requested fields.
+		showSelectedRepoInfo = slices.Contains(opts.Exporter.Fields(), fieldNumSelectedRepos)
+	}
 
+	var secrets []Secret
 	switch secretEntity {
 	case shared.Repository:
 		secrets, err = getRepoSecrets(client, baseRepo, secretApp)
 	case shared.Environment:
 		secrets, err = getEnvSecrets(client, baseRepo, envName)
 	case shared.Organization, shared.User:
-		var cfg config.Config
+		var cfg gh.Config
 		var host string
 
 		cfg, err = opts.Config()
@@ -144,7 +159,7 @@ func listRun(opts *ListOptions) error {
 		return fmt.Errorf("failed to get secrets: %w", err)
 	}
 
-	if len(secrets) == 0 {
+	if len(secrets) == 0 && opts.Exporter == nil {
 		return cmdutil.NewNoResultsError("no secrets found")
 	}
 
@@ -193,6 +208,10 @@ type Secret struct {
 	Visibility       shared.Visibility `json:"visibility"`
 	SelectedReposURL string            `json:"selected_repositories_url"`
 	NumSelectedRepos int               `json:"num_selected_repos"`
+}
+
+func (s *Secret) ExportData(fields []string) map[string]interface{} {
+	return cmdutil.StructExportData(s, fields)
 }
 
 func fmtVisibility(s Secret) string {
