@@ -13,8 +13,8 @@ import (
 	"github.com/cli/cli/v2/api"
 	ghContext "github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
-	"github.com/cli/cli/v2/internal/config"
 	fd "github.com/cli/cli/v2/internal/featuredetection"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
@@ -26,7 +26,7 @@ import (
 type StatusOptions struct {
 	HttpClient func() (*http.Client, error)
 	GitClient  *git.Client
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
 	Remotes    func() (ghContext.Remotes, error)
@@ -72,6 +72,7 @@ func NewCmdStatus(f *cmdutil.Factory, runF func(*StatusOptions) error) *cobra.Co
 }
 
 func statusRun(opts *StatusOptions) error {
+	ctx := context.Background()
 	httpClient, err := opts.HttpClient()
 	if err != nil {
 		return err
@@ -93,7 +94,11 @@ func statusRun(opts *StatusOptions) error {
 		}
 
 		remotes, _ := opts.Remotes()
-		currentPRNumber, currentPRHeadRef, err = prSelectorForCurrentBranch(opts.GitClient, baseRepo, currentBranch, remotes)
+		branchConfig, err := opts.GitClient.ReadBranchConfig(ctx, currentBranch)
+		if err != nil {
+			return err
+		}
+		currentPRNumber, currentPRHeadRef, err = prSelectorForCurrentBranch(branchConfig, baseRepo, currentBranch, remotes)
 		if err != nil {
 			return fmt.Errorf("could not query for pull request for current branch: %w", err)
 		}
@@ -184,31 +189,42 @@ func statusRun(opts *StatusOptions) error {
 	return nil
 }
 
-func prSelectorForCurrentBranch(gitClient *git.Client, baseRepo ghrepo.Interface, prHeadRef string, rem ghContext.Remotes) (prNumber int, selector string, err error) {
-	selector = prHeadRef
-	branchConfig := gitClient.ReadBranchConfig(context.Background(), prHeadRef)
-
+func prSelectorForCurrentBranch(branchConfig git.BranchConfig, baseRepo ghrepo.Interface, prHeadRef string, rem ghContext.Remotes) (int, string, error) {
 	// the branch is configured to merge a special PR head ref
 	prHeadRE := regexp.MustCompile(`^refs/pull/(\d+)/head$`)
 	if m := prHeadRE.FindStringSubmatch(branchConfig.MergeRef); m != nil {
-		prNumber, _ = strconv.Atoi(m[1])
-		return
+		prNumber, err := strconv.Atoi(m[1])
+		if err != nil {
+			return 0, "", err
+		}
+		return prNumber, prHeadRef, nil
 	}
 
 	var branchOwner string
 	if branchConfig.RemoteURL != nil {
 		// the branch merges from a remote specified by URL
-		if r, err := ghrepo.FromURL(branchConfig.RemoteURL); err == nil {
-			branchOwner = r.RepoOwner()
+		r, err := ghrepo.FromURL(branchConfig.RemoteURL)
+		if err != nil {
+			// TODO: We aren't returning the error because we discovered that it was shadowed
+			// before refactoring to its current return pattern. Thus, we aren't confident
+			// that returning the error won't break existing behavior.
+			return 0, prHeadRef, nil
 		}
+		branchOwner = r.RepoOwner()
 	} else if branchConfig.RemoteName != "" {
 		// the branch merges from a remote specified by name
-		if r, err := rem.FindByName(branchConfig.RemoteName); err == nil {
-			branchOwner = r.RepoOwner()
+		r, err := rem.FindByName(branchConfig.RemoteName)
+		if err != nil {
+			// TODO: We aren't returning the error because we discovered that it was shadowed
+			// before refactoring to its current return pattern. Thus, we aren't confident
+			// that returning the error won't break existing behavior.
+			return 0, prHeadRef, nil
 		}
+		branchOwner = r.RepoOwner()
 	}
 
 	if branchOwner != "" {
+		selector := prHeadRef
 		if strings.HasPrefix(branchConfig.MergeRef, "refs/heads/") {
 			selector = strings.TrimPrefix(branchConfig.MergeRef, "refs/heads/")
 		}
@@ -216,9 +232,10 @@ func prSelectorForCurrentBranch(gitClient *git.Client, baseRepo ghrepo.Interface
 		if !strings.EqualFold(branchOwner, baseRepo.RepoOwner()) {
 			selector = fmt.Sprintf("%s:%s", branchOwner, selector)
 		}
+		return 0, selector, nil
 	}
 
-	return
+	return 0, prHeadRef, nil
 }
 
 func totalApprovals(pr *api.PullRequest) int {
@@ -276,14 +293,14 @@ func printPrs(io *iostreams.IOStreams, totalCount int, prs ...api.PullRequest) {
 				fmt.Fprint(w, cs.Green(fmt.Sprintf("✓ %s Approved", s)))
 			}
 
-			if pr.Mergeable == "MERGEABLE" {
+			if pr.Mergeable == api.PullRequestMergeableMergeable {
 				// prefer "No merge conflicts" to "Mergeable" as there is more to mergeability
 				// than the git status. Missing or failing required checks prevent merging
 				// even though a PR is technically mergeable, which is often a source of confusion.
 				fmt.Fprintf(w, " %s", cs.Green("✓ No merge conflicts"))
-			} else if pr.Mergeable == "CONFLICTING" {
+			} else if pr.Mergeable == api.PullRequestMergeableConflicting {
 				fmt.Fprintf(w, " %s", cs.Red("× Merge conflicts"))
-			} else if pr.Mergeable == "UNKNOWN" {
+			} else if pr.Mergeable == api.PullRequestMergeableUnknown {
 				fmt.Fprintf(w, " %s", cs.Yellow("! Merge conflict status unknown"))
 			}
 

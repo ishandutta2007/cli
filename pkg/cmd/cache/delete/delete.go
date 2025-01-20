@@ -34,24 +34,24 @@ func NewCmdDelete(f *cmdutil.Factory, runF func(*DeleteOptions) error) *cobra.Co
 
 	cmd := &cobra.Command{
 		Use:   "delete [<cache-id>| <cache-key> | --all]",
-		Short: "Delete Github Actions caches",
-		Long: `
-		Delete Github Actions caches.
+		Short: "Delete GitHub Actions caches",
+		Long: heredoc.Docf(`
+			Delete GitHub Actions caches.
 
-		Deletion requires authorization with the "repo" scope.
-`,
+			Deletion requires authorization with the %[1]srepo%[1]s scope.
+		`, "`"),
 		Example: heredoc.Doc(`
-		# Delete a cache by id
-		$ gh cache delete 1234
+			# Delete a cache by id
+			$ gh cache delete 1234
 
-		# Delete a cache by key
-		$ gh cache delete cache-key
+			# Delete a cache by key
+			$ gh cache delete cache-key
 
-		# Delete a cache by id in a specific repo
-		$ gh cache delete 1234 --repo cli/cli
+			# Delete a cache by id in a specific repo
+			$ gh cache delete 1234 --repo cli/cli
 
-		# Delete all caches
-		$ gh cache delete --all
+			# Delete all caches
+			$ gh cache delete --all
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

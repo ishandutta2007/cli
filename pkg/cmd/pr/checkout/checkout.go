@@ -9,7 +9,7 @@ import (
 	"github.com/cli/cli/v2/api"
 	cliContext "github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -20,7 +20,7 @@ import (
 type CheckoutOptions struct {
 	HttpClient func() (*http.Client, error)
 	GitClient  *git.Client
-	Config     func() (config.Config, error)
+	Config     func() (gh.Config, error)
 	IO         *iostreams.IOStreams
 	Remotes    func() (cliContext.Remotes, error)
 	Branch     func() (string, error)
@@ -65,7 +65,7 @@ func NewCmdCheckout(f *cmdutil.Factory, runF func(*CheckoutOptions) error) *cobr
 	cmd.Flags().BoolVarP(&opts.RecurseSubmodules, "recurse-submodules", "", false, "Update all submodules after checkout")
 	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "Reset the existing local branch to the latest state of the pull request")
 	cmd.Flags().BoolVarP(&opts.Detach, "detach", "", false, "Checkout PR with a detached HEAD")
-	cmd.Flags().StringVarP(&opts.BranchName, "branch", "b", "", "Local branch name to use (default: the name of the head branch)")
+	cmd.Flags().StringVarP(&opts.BranchName, "branch", "b", "", "Local branch name to use (default [the name of the head branch])")
 
 	return cmd
 }
@@ -84,7 +84,7 @@ func checkoutRun(opts *CheckoutOptions) error {
 	if err != nil {
 		return err
 	}
-	protocol := cfg.Authentication().GitProtocol(baseRepo.RepoHost())
+	protocol := cfg.GitProtocol(baseRepo.RepoHost()).Value
 
 	remotes, err := opts.Remotes()
 	if err != nil {
@@ -130,7 +130,9 @@ func checkoutRun(opts *CheckoutOptions) error {
 		cmdQueue = append(cmdQueue, []string{"submodule", "update", "--init", "--recursive"})
 	}
 
-	err = executeCmds(opts.GitClient, cmdQueue)
+	// Note that although we will probably be fetching from the head, in practice, PR checkout can only
+	// ever point to one host, and we know baseRepo must be populated.
+	err = executeCmds(opts.GitClient, git.CredentialPatternFromHost(baseRepo.RepoHost()), cmdQueue)
 	if err != nil {
 		return err
 	}
@@ -240,13 +242,16 @@ func localBranchExists(client *git.Client, b string) bool {
 	return err == nil
 }
 
-func executeCmds(client *git.Client, cmdQueue [][]string) error {
+func executeCmds(client *git.Client, credentialPattern git.CredentialPattern, cmdQueue [][]string) error {
 	for _, args := range cmdQueue {
 		var err error
 		var cmd *git.Command
-		if args[0] == "fetch" || args[0] == "submodule" {
-			cmd, err = client.AuthenticatedCommand(context.Background(), args...)
-		} else {
+		switch args[0] {
+		case "submodule":
+			cmd, err = client.AuthenticatedCommand(context.Background(), credentialPattern, args...)
+		case "fetch":
+			cmd, err = client.AuthenticatedCommand(context.Background(), git.AllMatchingCredentialsPattern, args...)
+		default:
 			cmd, err = client.Command(context.Background(), args...)
 		}
 		if err != nil {

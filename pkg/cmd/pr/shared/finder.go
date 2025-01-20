@@ -37,7 +37,7 @@ type finder struct {
 	branchFn     func() (string, error)
 	remotesFn    func() (remotes.Remotes, error)
 	httpClient   func() (*http.Client, error)
-	branchConfig func(string) git.BranchConfig
+	branchConfig func(string) (git.BranchConfig, error)
 	progress     progressIndicator
 
 	repo       ghrepo.Interface
@@ -58,7 +58,7 @@ func NewFinder(factory *cmdutil.Factory) PRFinder {
 		remotesFn:  factory.Remotes,
 		httpClient: factory.HttpClient,
 		progress:   factory.IOStreams,
-		branchConfig: func(s string) git.BranchConfig {
+		branchConfig: func(s string) (git.BranchConfig, error) {
 			return factory.GitClient.ReadBranchConfig(context.Background(), s)
 		},
 	}
@@ -238,7 +238,10 @@ func (f *finder) parseCurrentBranch() (string, int, error) {
 		return "", 0, err
 	}
 
-	branchConfig := f.branchConfig(prHeadRef)
+	branchConfig, err := f.branchConfig(prHeadRef)
+	if err != nil {
+		return "", 0, err
+	}
 
 	// the branch is configured to merge a special PR head ref
 	if m := prHeadRE.FindStringSubmatch(branchConfig.MergeRef); m != nil {
@@ -246,27 +249,36 @@ func (f *finder) parseCurrentBranch() (string, int, error) {
 		return "", prNumber, nil
 	}
 
-	var branchOwner string
+	var gitRemoteRepo ghrepo.Interface
 	if branchConfig.RemoteURL != nil {
 		// the branch merges from a remote specified by URL
 		if r, err := ghrepo.FromURL(branchConfig.RemoteURL); err == nil {
-			branchOwner = r.RepoOwner()
+			gitRemoteRepo = r
 		}
 	} else if branchConfig.RemoteName != "" {
 		// the branch merges from a remote specified by name
 		rem, _ := f.remotesFn()
 		if r, err := rem.FindByName(branchConfig.RemoteName); err == nil {
-			branchOwner = r.RepoOwner()
+			gitRemoteRepo = r
 		}
 	}
 
-	if branchOwner != "" {
+	if gitRemoteRepo != nil {
 		if strings.HasPrefix(branchConfig.MergeRef, "refs/heads/") {
 			prHeadRef = strings.TrimPrefix(branchConfig.MergeRef, "refs/heads/")
 		}
 		// prepend `OWNER:` if this branch is pushed to a fork
-		if !strings.EqualFold(branchOwner, f.repo.RepoOwner()) {
-			prHeadRef = fmt.Sprintf("%s:%s", branchOwner, prHeadRef)
+		// This is determined by:
+		//  - The repo having a different owner
+		//  - The repo having the same owner but a different name (private org fork)
+		// I suspect that the implementation of the second case may be broken in the face
+		// of a repo rename, where the remote hasn't been updated locally. This is a
+		// frequent issue in commands that use SmartBaseRepoFunc. It's not any worse than not
+		// supporting this case at all though.
+		sameOwner := strings.EqualFold(gitRemoteRepo.RepoOwner(), f.repo.RepoOwner())
+		sameOwnerDifferentRepoName := sameOwner && !strings.EqualFold(gitRemoteRepo.RepoName(), f.repo.RepoName())
+		if !sameOwner || sameOwnerDifferentRepoName {
+			prHeadRef = fmt.Sprintf("%s:%s", gitRemoteRepo.RepoOwner(), prHeadRef)
 		}
 	}
 
@@ -355,7 +367,13 @@ func findForBranch(httpClient *http.Client, repo ghrepo.Interface, baseBranch, h
 	})
 
 	for _, pr := range prs {
-		if pr.HeadLabel() == headBranch && (baseBranch == "" || pr.BaseRefName == baseBranch) && (pr.State == "OPEN" || resp.Repository.DefaultBranchRef.Name != headBranch) {
+		headBranchMatches := pr.HeadLabel() == headBranch
+		baseBranchEmptyOrMatches := baseBranch == "" || pr.BaseRefName == baseBranch
+		// When the head is the default branch, it doesn't really make sense to show merged or closed PRs.
+		// https://github.com/cli/cli/issues/4263
+		isNotClosedOrMergedWhenHeadIsDefault := pr.State == "OPEN" || resp.Repository.DefaultBranchRef.Name != headBranch
+
+		if headBranchMatches && baseBranchEmptyOrMatches && isNotClosedOrMergedWhenHeadIsDefault {
 			return &pr, nil
 		}
 	}
